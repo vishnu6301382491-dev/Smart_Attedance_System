@@ -77,3 +77,5 @@ instance/
 app/static/uploads/
 scratch/
 .system_generated/
+
+PUSH_TO_GITHUB.bat

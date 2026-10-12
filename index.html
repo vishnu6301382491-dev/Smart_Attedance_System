@@ -34,6 +34,10 @@
     <!-- Chart.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 
+    <!-- TensorFlow.js and BlazeFace for Browser-Native Face Detection (GitHub Pages Compatible) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
+
     <!-- Unified Camera Service -->
     <script src="app/static/js/camera.js"></script>
 
@@ -665,7 +669,7 @@
                         <div class="w-8 h-8 rounded-xl bg-blue-100 dark:bg-blue-900/50 text-blue-600 font-bold flex items-center justify-center text-xs">1</div>
                         <div>
                             <div class="font-black text-sm text-slate-900 dark:text-white" id="live-session-header-title">CSE-3B — Operating Systems</div>
-                            <div class="text-[11px] text-slate-400">Engine: <span class="text-blue-600 font-semibold font-mono">OpenCV-LBPH</span> • Started at 09:00 UTC</div>
+                            <div class="text-[11px] text-slate-400">Engine: <span id="live-engine-badge" class="text-blue-600 font-semibold font-mono">Biometric Vision (Client Standalone)</span> • Started at 09:00 UTC</div>
                         </div>
                         <span class="px-2 py-0.5 rounded text-[10px] font-black bg-blue-50 dark:bg-blue-950 text-blue-600 border border-blue-200 dark:border-blue-800">Period 1</span>
                     </div>
@@ -723,13 +727,18 @@
                             <video id="enroll-video" autoplay playsinline muted></video>
                             <canvas id="enroll-canvas"></canvas>
                         </div>
-                        <div class="flex items-center space-x-3">
+                        <div class="flex flex-wrap items-center justify-center gap-3">
                             <button onclick="startEnrollCamera()" class="px-4 py-2 bg-slate-100 dark:bg-slate-800 font-bold text-xs rounded-xl hover:bg-slate-200 dark:hover:bg-slate-700 transition">
                                 Start Camera
                             </button>
                             <button onclick="captureEnrollSample()" class="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-sm transition">
                                 Capture Sample
                             </button>
+                            <label class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition cursor-pointer flex items-center">
+                                <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                                Upload Face Photo
+                                <input type="file" id="enroll-file-input" accept="image/*" class="hidden" onchange="handleEnrollFileUpload(event)">
+                            </label>
                         </div>
                     </div>
 
@@ -1227,15 +1236,15 @@
 
         // Baseline Biometric Signatures Generator for Enrolled Demo Students
         function generateDemoFaceTemplate(seedId) {
-            const vec = new Array(64);
+            const vec = new Array(160);
             let norm = 0;
-            for (let i = 0; i < 64; i++) {
+            for (let i = 0; i < 160; i++) {
                 const val = Math.sin((seedId * 17) + (i * 0.42)) * 0.5 + 0.5;
                 vec[i] = val;
                 norm += val * val;
             }
             norm = Math.sqrt(norm) || 1;
-            for (let i = 0; i < 64; i++) vec[i] /= norm;
+            for (let i = 0; i < 160; i++) vec[i] /= norm;
             return vec;
         }
 
@@ -1560,7 +1569,12 @@
                 if (tabId === 'subjects') renderSubjectsTable();
                 if (tabId === 'timetable') renderTimetableGrid();
                 if (tabId === 'holidays') renderHolidaysTable();
-                if (tabId === 'live') initLiveRoster();
+                if (tabId === 'live') {
+                    initLiveRoster();
+                    updateLiveEngineBadge();
+                    initFaceDetector();
+                }
+                if (tabId === 'enroll') initFaceDetector();
                 if (tabId === 'records') renderRecordsTable();
                 if (tabId === 'shortage') renderShortageTable();
                 if (tabId === 'audit') renderAuditLogs();
@@ -1626,7 +1640,8 @@
                     badge.className = 'hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300';
                     badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>Live API Connected';
                     document.getElementById('diag-db-status').textContent = 'Connected (PostgreSQL)';
-                    document.getElementById('diag-engine-name').textContent = data.face_engine;
+                    document.getElementById('diag-engine-name').textContent = data.face_engine || 'OpenCV-LBPH';
+                    updateLiveEngineBadge();
                     syncWithBackend();
                     return;
                 }
@@ -1635,6 +1650,9 @@
             state.backendOnline = false;
             badge.className = 'hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300';
             badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-blue-500 mr-1.5"></span>Standalone Mode';
+            const diagEngine = document.getElementById('diag-engine-name');
+            if (diagEngine) diagEngine.textContent = 'BlazeFace + LBPH Spatial Histograms (Browser Native)';
+            updateLiveEngineBadge();
         }
 
         async function syncWithBackend() {
@@ -1920,6 +1938,17 @@
             document.getElementById('live-unmarked-count').textContent = Math.max(0, classStudents.length - present);
         }
 
+        function updateLiveEngineBadge() {
+            const badge = document.getElementById('live-engine-badge');
+            if (badge) {
+                if (state.backendOnline) {
+                    badge.textContent = 'OpenCV-LBPH (Cloud Connected)';
+                } else {
+                    badge.textContent = 'Biometric Vision (Client Standalone)';
+                }
+            }
+        }
+
         async function toggleLiveCamera() {
             const video = document.getElementById('live-video');
             const btn = document.getElementById('btn-toggle-camera');
@@ -1929,18 +1958,28 @@
                 return;
             }
 
+            const statusEl = document.getElementById('live-status-text');
+            if (statusEl) statusEl.textContent = 'Camera Starting';
+
+            // Ensure face detector is warmed up
+            initFaceDetector();
+
             await window.CameraService.startCamera(video, {
                 onStateChange: (state, text) => {
-                    document.getElementById('live-status-text').textContent = text;
+                    if (statusEl) statusEl.textContent = text;
                 },
                 onReady: () => {
                     isLiveRunning = true;
-                    btn.textContent = 'End Session';
-                    btn.className = 'px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black transition shadow-sm';
-                    document.getElementById('live-status-text').textContent = 'Camera Active • Scanning Faces';
+                    if (btn) {
+                        btn.textContent = 'End Session';
+                        btn.className = 'px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black transition shadow-sm flex items-center';
+                    }
+                    if (statusEl) statusEl.textContent = 'Camera Ready';
+                    updateLiveEngineBadge();
                     startLiveRecognitionLoop();
                 },
                 onError: (err) => {
+                    if (statusEl) statusEl.textContent = 'Recognition Error: Camera unavailable';
                     showToast(err.message || 'Camera Error', 'error');
                 }
             });
@@ -1949,7 +1988,7 @@
         // ==========================================
         // COMPUTER VISION & BIOMETRIC RECOGNITION ENGINE
         // ==========================================
-        const RECOGNITION_CONFIDENCE_THRESHOLD = 75; // 75% minimum similarity required
+        const RECOGNITION_CONFIDENCE_THRESHOLD = 72; // 72% minimum similarity required
 
         // Audio confirmation chime
         function playAttendanceChime() {
@@ -1974,34 +2013,84 @@
         const cvCanvas = document.createElement('canvas');
         const cvCtx = cvCanvas.getContext('2d', { willReadFrequently: true });
 
-        // Face localization: detects whether a real face is in the frame and returns bounding box
-        async function detectFacesInVideo(video) {
-            if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-                return [];
+        // Asynchronous BlazeFace detector loader
+        let blazefaceModel = null;
+        let isBlazeFaceLoading = false;
+
+        async function initFaceDetector() {
+            if (blazefaceModel || isBlazeFaceLoading) return blazefaceModel;
+            if (typeof blazeface !== 'undefined') {
+                try {
+                    isBlazeFaceLoading = true;
+                    console.log('🔄 Loading BlazeFace computer vision model...');
+                    blazefaceModel = await blazeface.load();
+                    console.log('✅ BlazeFace face detector model loaded successfully.');
+                    return blazefaceModel;
+                } catch (err) {
+                    console.warn('⚠️ BlazeFace loading failed, using robust vision fallback:', err);
+                } finally {
+                    isBlazeFaceLoading = false;
+                }
+            }
+            return null;
+        }
+
+        // Face localization: detects faces in video, image, or canvas element and returns bounding boxes
+        async function detectFacesInVideo(source) {
+            if (!source) return [];
+            const srcW = source.videoWidth || source.naturalWidth || source.width || 0;
+            const srcH = source.videoHeight || source.naturalHeight || source.height || 0;
+            if (srcW === 0 || srcH === 0) return [];
+
+            // 1. High-precision neural detection via BlazeFace (TensorFlow.js)
+            if (!blazefaceModel && typeof blazeface !== 'undefined' && !isBlazeFaceLoading) {
+                await initFaceDetector();
             }
 
-            // 1. Try Native Browser FaceDetector if supported
+            if (blazefaceModel) {
+                try {
+                    const predictions = await blazefaceModel.estimateFaces(source, false);
+                    if (predictions && predictions.length > 0) {
+                        return predictions.map(p => {
+                            const start = p.topLeft;
+                            const end = p.bottomRight;
+                            const w = Math.round(end[0] - start[0]);
+                            const h = Math.round(end[1] - start[1]);
+                            return {
+                                x: Math.max(0, Math.round(start[0])),
+                                y: Math.max(0, Math.round(start[1])),
+                                w: Math.min(w, srcW - Math.max(0, Math.round(start[0]))),
+                                h: Math.min(h, srcH - Math.max(0, Math.round(start[1])))
+                            };
+                        });
+                    }
+                } catch (e) {
+                    console.warn('BlazeFace detection error:', e);
+                }
+            }
+
+            // 2. Browser Native Shape Detection API if available
             if (window.FaceDetector) {
                 try {
                     const detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 3 });
-                    const nativeFaces = await detector.detect(video);
+                    const nativeFaces = await detector.detect(source);
                     if (nativeFaces && nativeFaces.length > 0) {
                         return nativeFaces.map(f => ({
-                            x: Math.round(f.boundingBox.x),
-                            y: Math.round(f.boundingBox.y),
-                            w: Math.round(f.boundingBox.width),
-                            h: Math.round(f.boundingBox.height)
+                            x: Math.max(0, Math.round(f.boundingBox.x)),
+                            y: Math.max(0, Math.round(f.boundingBox.y)),
+                            w: Math.min(Math.round(f.boundingBox.width), srcW),
+                            h: Math.min(Math.round(f.boundingBox.height), srcH)
                         }));
                     }
                 } catch(e) {}
             }
 
-            // 2. Fast Canvas-based Face Localization (Skin-Chrominance & Luminance Gradient Model)
+            // 3. Robust Adaptive Multi-Channel Computer Vision Fallback (Works 100% offline)
             const sw = 160;
             const sh = 120;
             cvCanvas.width = sw;
             cvCanvas.height = sh;
-            cvCtx.drawImage(video, 0, 0, sw, sh);
+            cvCtx.drawImage(source, 0, 0, sw, sh);
             const imgData = cvCtx.getImageData(0, 0, sw, sh);
             const pixels = imgData.data;
 
@@ -2014,11 +2103,17 @@
                     const r = pixels[idx];
                     const g = pixels[idx + 1];
                     const b = pixels[idx + 2];
+                    const sum = r + g + b;
 
-                    // Standard YCbCr / RGB skin color distribution heuristic
-                    const isSkin = (r > 60 && g > 35 && b > 20 &&
-                                    r > g && r > b &&
-                                    (r - g) > 12 && Math.abs(r - b) > 12);
+                    // Normalized chromaticity skin locus: invariant to brightness
+                    let isSkin = false;
+                    if (sum > 60) {
+                        const nr = r / sum;
+                        const ng = g / sum;
+                        if (nr > 0.34 && nr < 0.58 && ng > 0.25 && ng < 0.39 && (r - g) > 4) {
+                            isSkin = true;
+                        }
+                    }
 
                     if (isSkin) {
                         skinPixelCount++;
@@ -2033,91 +2128,127 @@
             const totalPixels = sw * sh;
             const skinRatio = skinPixelCount / totalPixels;
 
-            // Face is present if skin area is substantial (> 4% and < 75% of frame)
-            if (skinRatio > 0.04 && skinRatio < 0.75 && maxX > minX && maxY > minY) {
-                const scaleX = video.videoWidth / sw;
-                const scaleY = video.videoHeight / sh;
+            // Face is present if skin area is substantial (> 3% and < 80% of frame)
+            if (skinRatio > 0.03 && skinRatio < 0.80 && maxX > minX && maxY > minY) {
+                const scaleX = srcW / sw;
+                const scaleY = srcH / sh;
 
-                const boxW = Math.max(120, Math.round((maxX - minX) * scaleX));
-                const boxH = Math.max(140, Math.round((maxY - minY) * scaleY * 1.15));
+                const boxW = Math.max(100, Math.round((maxX - minX) * scaleX));
+                const boxH = Math.max(120, Math.round((maxY - minY) * scaleY * 1.15));
                 const boxX = Math.max(10, Math.round(minX * scaleX));
-                const boxY = Math.max(10, Math.round(minY * scaleY * 0.9));
+                const boxY = Math.max(10, Math.round(minY * scaleY * 0.92));
 
                 return [{
-                    x: Math.min(boxX, video.videoWidth - boxW),
-                    y: Math.min(boxY, video.videoHeight - boxH),
-                    w: Math.min(boxW, video.videoWidth - 20),
-                    h: Math.min(boxH, video.videoHeight - 20)
+                    x: Math.min(boxX, srcW - boxW),
+                    y: Math.min(boxY, srcH - boxH),
+                    w: Math.min(boxW, srcW - 20),
+                    h: Math.min(boxH, srcH - 20)
                 }];
             }
 
             return [];
         }
 
-        // Extracts a 64-element normalized feature descriptor from a face region
-        function extractFaceFeatureDescriptor(video, box) {
-            const cropCanvas = document.createElement('canvas');
-            cropCanvas.width = 64;
-            cropCanvas.height = 64;
-            const cropCtx = cropCanvas.getContext('2d');
+        // Extracts a 160-element normalized Local Binary Pattern Histogram (LBPH) descriptor from face ROI
+        function extractFaceFeatureDescriptor(source, box) {
+            const normCanvas = document.createElement('canvas');
+            normCanvas.width = 120;
+            normCanvas.height = 120;
+            const nCtx = normCanvas.getContext('2d', { willReadFrequently: true });
 
-            if (box && box.w > 0 && box.h > 0) {
-                cropCtx.drawImage(video, box.x, box.y, box.w, box.h, 0, 0, 64, 64);
-            } else {
-                cropCtx.drawImage(video, 0, 0, 64, 64);
+            const sw = source.videoWidth || source.naturalWidth || source.width || 640;
+            const sh = source.videoHeight || source.naturalHeight || source.height || 480;
+
+            let bx = box ? box.x : Math.round(sw * 0.2);
+            let by = box ? box.y : Math.round(sh * 0.15);
+            let bw = box ? box.w : Math.round(sw * 0.6);
+            let bh = box ? box.h : Math.round(sh * 0.7);
+
+            // Add 10% padding margin around detected face box
+            const padX = Math.round(bw * 0.1);
+            const padY = Math.round(bh * 0.1);
+            bx = Math.max(0, bx - padX);
+            by = Math.max(0, by - padY);
+            bw = Math.min(sw - bx, bw + 2 * padX);
+            bh = Math.min(sh - by, bh + 2 * padY);
+
+            nCtx.drawImage(source, bx, by, bw, bh, 0, 0, 120, 120);
+
+            const imgData = nCtx.getImageData(0, 0, 120, 120);
+            const d = imgData.data;
+
+            // 1. Grayscale conversion
+            const gray = new Float32Array(120 * 120);
+            let sumLum = 0, sumSq = 0;
+            for (let i = 0; i < 120 * 120; i++) {
+                const g = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+                gray[i] = g;
+                sumLum += g;
+                sumSq += g * g;
             }
 
-            const imgData = cropCtx.getImageData(0, 0, 64, 64);
-            const data = imgData.data;
+            // 2. Contrast normalization / zero-mean unit-variance
+            const N = 120 * 120;
+            const meanLum = sumLum / N;
+            const stdLum = Math.sqrt(Math.max(1, (sumSq / N) - (meanLum * meanLum)));
+            const normGray = new Float32Array(120 * 120);
+            for (let i = 0; i < N; i++) {
+                normGray[i] = Math.max(0, Math.min(255, ((gray[i] - meanLum) / stdLum) * 48 + 128));
+            }
 
-            // 4x4 spatial grid = 16 blocks, 4 features per block (mean luminance, horizontal gradient, vertical gradient, variance)
-            const descriptor = new Array(64).fill(0);
-            const blockSize = 16;
+            // 3. Multi-block Local Binary Pattern (LBP) Spatial Histograms (4x4 grid = 16 blocks)
+            const descriptor = new Float32Array(160);
+            const blockSize = 30;
 
             for (let by = 0; by < 4; by++) {
                 for (let bx = 0; bx < 4; bx++) {
-                    const blockIdx = (by * 4 + bx) * 4;
-                    let sumLum = 0, sumSq = 0, sumGradH = 0, sumGradV = 0;
+                    const blockIdx = (by * 4 + bx) * 10;
+                    const hist = new Float32Array(8); // 8 LBP bins
+                    let sumGradH = 0, sumGradV = 0, count = 0;
 
-                    for (let py = 0; py < blockSize; py++) {
-                        for (let px = 0; px < blockSize; px++) {
+                    for (let py = 1; py < blockSize - 1; py++) {
+                        for (let px = 1; px < blockSize - 1; px++) {
                             const x = bx * blockSize + px;
                             const y = by * blockSize + py;
-                            const idx = (y * 64 + x) * 4;
-                            const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-                            sumLum += lum;
-                            sumSq += lum * lum;
+                            const c = normGray[y * 120 + x];
 
-                            if (px > 0) {
-                                const prevIdx = (y * 64 + (x - 1)) * 4;
-                                const prevLum = 0.299 * data[prevIdx] + 0.587 * data[prevIdx + 1] + 0.114 * data[prevIdx + 2];
-                                sumGradH += Math.abs(lum - prevLum);
-                            }
-                            if (py > 0) {
-                                const upIdx = ((y - 1) * 64 + x) * 4;
-                                const upLum = 0.299 * data[upIdx] + 0.587 * data[upIdx + 1] + 0.114 * data[upIdx + 2];
-                                sumGradV += Math.abs(lum - upLum);
-                            }
+                            // 8-neighbor LBP
+                            let lbp = 0;
+                            if (normGray[(y - 1) * 120 + (x - 1)] >= c) lbp |= 128;
+                            if (normGray[(y - 1) * 120 + x]       >= c) lbp |= 64;
+                            if (normGray[(y - 1) * 120 + (x + 1)] >= c) lbp |= 32;
+                            if (normGray[y * 120 + (x + 1)]       >= c) lbp |= 16;
+                            if (normGray[(y + 1) * 120 + (x + 1)] >= c) lbp |= 8;
+                            if (normGray[(y + 1) * 120 + x]       >= c) lbp |= 4;
+                            if (normGray[(y + 1) * 120 + (x - 1)] >= c) lbp |= 2;
+                            if (normGray[y * 120 + (x - 1)]       >= c) lbp |= 1;
+
+                            const bin = Math.min(7, Math.floor(lbp / 32));
+                            hist[bin]++;
+
+                            sumGradH += Math.abs(normGray[y * 120 + (x + 1)] - normGray[y * 120 + (x - 1)]);
+                            sumGradV += Math.abs(normGray[(y + 1) * 120 + x] - normGray[(y - 1) * 120 + x]);
+                            count++;
                         }
                     }
 
-                    const N = blockSize * blockSize;
-                    const mean = sumLum / N;
-                    const variance = Math.sqrt(Math.max(0, (sumSq / N) - (mean * mean)));
-                    descriptor[blockIdx] = mean / 255.0;
-                    descriptor[blockIdx + 1] = variance / 128.0;
-                    descriptor[blockIdx + 2] = (sumGradH / N) / 128.0;
-                    descriptor[blockIdx + 3] = (sumGradV / N) / 128.0;
+                    // Store 8 normalized LBP histogram bins
+                    for (let h = 0; h < 8; h++) {
+                        descriptor[blockIdx + h] = hist[h] / (count || 1);
+                    }
+                    // Plus 2 spatial gradient texture features
+                    descriptor[blockIdx + 8] = (sumGradH / (count || 1)) / 128.0;
+                    descriptor[blockIdx + 9] = (sumGradV / (count || 1)) / 128.0;
                 }
             }
 
-            // Normalize vector to unit length
+            // 4. L2 Normalization to unit hypersphere
             let norm = 0;
-            for (let i = 0; i < 64; i++) norm += descriptor[i] * descriptor[i];
+            for (let i = 0; i < 160; i++) norm += descriptor[i] * descriptor[i];
             norm = Math.sqrt(norm) || 1;
-            for (let i = 0; i < 64; i++) descriptor[i] /= norm;
+            for (let i = 0; i < 160; i++) descriptor[i] /= norm;
 
-            return descriptor;
+            return Array.from(descriptor);
         }
 
         // Cosine similarity comparison between two normalized descriptors (0.0 to 1.0)
@@ -2142,12 +2273,12 @@
             ctx.strokeRect(x, y, w, h);
 
             ctx.fillStyle = color;
-            const labelWidth = Math.min(w, Math.max(140, label.length * 8));
-            ctx.fillRect(x, Math.max(0, y - 24), labelWidth, 22);
+            const labelWidth = Math.min(w + 30, Math.max(140, label.length * 8 + 16));
+            ctx.fillRect(x, Math.max(0, y - 26), labelWidth, 24);
 
             ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 11px sans-serif';
-            ctx.fillText(label, x + 6, Math.max(14, y - 8));
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText(label, x + 8, Math.max(15, y - 9));
         }
 
         function recordAttendanceSuccess(student, confidence) {
@@ -2196,6 +2327,7 @@
             let frames = 0;
             const video = document.getElementById('live-video');
             const canvas = document.getElementById('live-canvas');
+            const statusText = document.getElementById('live-status-text');
 
             let isProcessingFrame = false;
 
@@ -2214,25 +2346,31 @@
                         lastTime = now;
                     }
 
-                    // Canvas setup
+                    // Canvas setup matching video dimensions
                     if (canvas) {
-                        canvas.width = video.videoWidth || 640;
-                        canvas.height = video.videoHeight || 480;
+                        const vw = video.videoWidth || 640;
+                        const vh = video.videoHeight || 480;
+                        if (canvas.width !== vw || canvas.height !== vh) {
+                            canvas.width = vw;
+                            canvas.height = vh;
+                        }
                     }
 
                     // 1. Detect faces in current frame
                     const detectedFaces = await detectFacesInVideo(video);
 
-                    // If NO face is detected in the camera
+                    // If NO face is detected in the camera view
                     if (!detectedFaces || detectedFaces.length === 0) {
                         if (canvas) {
                             const ctx = canvas.getContext('2d');
                             ctx.clearRect(0, 0, canvas.width, canvas.height);
                         }
-                        const statusText = document.getElementById('live-status-text');
-                        if (statusText) statusText.textContent = 'Camera Active • Scanning Faces (No face detected)';
+                        if (statusText) statusText.textContent = 'Detecting Face... (No face in view)';
                         return; // DO NOT mark any student!
                     }
+
+                    // Face Detected: proceed to recognition
+                    if (statusText) statusText.textContent = 'Face Detected • Recognizing...';
 
                     const ctx = canvas ? canvas.getContext('2d') : null;
                     if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -2254,8 +2392,11 @@
                                             const b = f.box || [160, 80, 200, 240];
                                             const x = b[0], y = b[1], w = b[2], h = b[3];
                                             const color = f.matched ? '#10b981' : '#f59e0b';
-                                            const label = f.matched ? `Verified: ${f.name} (${Math.round(f.confidence * 100)}%)` : 'Unknown Face';
+                                            const label = f.matched ? `Verified: ${f.name} (${Math.round(f.confidence * 100)}%)` : `Unknown Face (${Math.round((f.confidence || 0) * 100)}%)`;
                                             drawBoundingBox(ctx, { x, y, w, h }, label, color);
+                                            if (statusText) {
+                                                statusText.textContent = f.matched ? `Student Recognized: ${f.name} (${Math.round(f.confidence * 100)}%)` : `Unknown Face (${Math.round((f.confidence || 0) * 100)}%)`;
+                                            }
                                         });
                                     }
                                     if (data.marked && data.marked.length > 0) {
@@ -2274,10 +2415,10 @@
                         } catch(err) {}
                     }
 
-                    // 3. Local Deterministic Biometric Matching (Zero random marking)
+                    // 3. Local Deterministic LBPH Biometric Matching (High precision)
                     const classStudents = state.students.filter(s => s.class === state.activeClass && s.enrolled && s.active);
 
-                    // For each detected face, find SINGLE BEST MATCH among enrolled students
+                    // For each detected face, find best match among enrolled students
                     const candidateMatches = [];
 
                     for (let i = 0; i < detectedFaces.length; i++) {
@@ -2307,7 +2448,6 @@
                     }
 
                     // Conflict resolution across multiple faces in the same frame
-                    // If two faces both chose the same student, only assign the one with higher confidence
                     const assignedStudentIds = new Set();
                     candidateMatches.sort((a, b) => b.confidence - a.confidence);
 
@@ -2319,18 +2459,16 @@
                         if (stu && conf >= RECOGNITION_CONFIDENCE_THRESHOLD && !assignedStudentIds.has(stu.id)) {
                             assignedStudentIds.add(stu.id);
 
+                            if (statusText) statusText.textContent = `Student Recognized: ${stu.name} (${conf}%)`;
+
                             // Check if student is ALREADY marked present
                             if (markedMap.get(stu.id) === 'Present') {
                                 drawBoundingBox(ctx, box, `${stu.name} (Already Marked)`, '#10b981');
-                                const statusText = document.getElementById('live-status-text');
-                                if (statusText) statusText.textContent = `${stu.name} is already marked Present`;
                             } else {
-                                // Mark ONLY this student Present
+                                // Mark student Present
                                 markedMap.set(stu.id, 'Present');
                                 recordAttendanceSuccess(stu, conf);
                                 drawBoundingBox(ctx, box, `Verified: ${stu.name} (${conf}%)`, '#10b981');
-                                const statusText = document.getElementById('live-status-text');
-                                if (statusText) statusText.textContent = `Verified: ${stu.name} — Present`;
                                 playAttendanceChime();
                                 showToast(`Verified: ${stu.name} — Present`, 'success');
                                 initLiveRoster();
@@ -2339,14 +2477,16 @@
                             // Face is unknown, below threshold, or duplicate conflict
                             const label = (stu && assignedStudentIds.has(stu.id)) ? 'Unknown Face (Conflict)' : `Unknown Face (${conf}%)`;
                             drawBoundingBox(ctx, box, label, '#f59e0b');
-                            const statusText = document.getElementById('live-status-text');
-                            if (statusText) statusText.textContent = 'Face not recognized — attendance not recorded';
+                            if (statusText) statusText.textContent = `Unknown Face (${conf}%)`;
                         }
                     });
+                } catch (loopErr) {
+                    console.error('Recognition loop error:', loopErr);
+                    if (statusText) statusText.textContent = 'Recognition Error';
                 } finally {
                     isProcessingFrame = false;
                 }
-            }, 750);
+            }, 90);
         }
 
         function endLiveSession() {
@@ -2359,10 +2499,12 @@
             const btn = document.getElementById('btn-toggle-camera');
             if (btn) {
                 btn.textContent = 'Start Camera Session';
-                btn.className = 'px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition shadow-sm';
+                btn.className = 'px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition shadow-sm flex items-center';
             }
             const statusEl = document.getElementById('live-status-text');
             if (statusEl) statusEl.textContent = 'Session ended';
+            const fpsEl = document.getElementById('live-fps');
+            if (fpsEl) fpsEl.textContent = '0 FPS';
             const canvas = document.getElementById('live-canvas');
             if (canvas) {
                 const ctx = canvas.getContext('2d');
@@ -2371,32 +2513,79 @@
             showToast('Session ended and attendance saved', 'info');
         }
 
-        // Enrollment
+        // ==========================================
+        // ENROLLMENT MODULE (CAMERA & PHOTO UPLOAD)
+        // ==========================================
         async function startEnrollCamera() {
             const video = document.getElementById('enroll-video');
+            await initFaceDetector();
             await window.CameraService.startCamera(video);
             showToast('Enrollment camera active', 'info');
         }
 
         async function captureEnrollSample() {
+            const video = document.getElementById('enroll-video');
+            const stuId = parseInt(document.getElementById('enroll-student-select').value);
+            const target = state.students.find(s => s.id === stuId);
+
+            if (!video || video.readyState < 2) {
+                showToast('Please start the enrollment camera first.', 'warning');
+                return;
+            }
+
+            if (!target) {
+                showToast('Please select a student to enroll.', 'warning');
+                return;
+            }
+
+            // Run face detection on current camera frame
+            await initFaceDetector();
+            const detectedFaces = await detectFacesInVideo(video);
+
+            if (!detectedFaces || detectedFaces.length === 0) {
+                showToast('No face detected in camera! Please face the camera directly in good lighting.', 'warning');
+                return;
+            }
+
+            const faceBox = detectedFaces[0];
+            const canvas = document.getElementById('enroll-canvas');
+            if (canvas) {
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0);
+                drawBoundingBox(ctx, faceBox, `Sample #${enrollCount + 1}`, '#3b82f6');
+            }
+
             if (enrollCount < 5) {
                 enrollCount++;
-                document.getElementById('enroll-progress-bar').style.width = `${enrollCount * 20}%`;
-                document.getElementById('enroll-status-text').textContent = `${enrollCount} / 5 Samples Captured`;
+                const progBar = document.getElementById('enroll-progress-bar');
+                const statText = document.getElementById('enroll-status-text');
+                if (progBar) progBar.style.width = `${enrollCount * 20}%`;
+                if (statText) statText.textContent = `${enrollCount} / 5 Samples Captured`;
 
-                const stuId = parseInt(document.getElementById('enroll-student-select').value);
-                const video = document.getElementById('enroll-video');
-                const frame = window.CameraService.captureFrame(video);
-
-                // Extract and store actual biometric face descriptor from live webcam sample
-                if (video && video.videoWidth && video.videoHeight) {
-                    const desc = extractFaceFeatureDescriptor(video);
-                    if (desc) {
+                const desc = extractFaceFeatureDescriptor(video, faceBox);
+                if (desc) {
+                    if (enrollCount === 1 || !state.studentBiometrics[stuId]) {
                         state.studentBiometrics[stuId] = desc;
-                        localStorage.setItem('sas_student_biometrics', JSON.stringify(state.studentBiometrics));
+                    } else {
+                        // Blend multiple samples for noise immunity
+                        const curr = state.studentBiometrics[stuId];
+                        const blended = new Array(desc.length);
+                        let norm = 0;
+                        for (let i = 0; i < desc.length; i++) {
+                            const val = (curr[i] * (enrollCount - 1) + desc[i]) / enrollCount;
+                            blended[i] = val;
+                            norm += val * val;
+                        }
+                        norm = Math.sqrt(norm) || 1;
+                        for (let i = 0; i < desc.length; i++) blended[i] /= norm;
+                        state.studentBiometrics[stuId] = blended;
                     }
+                    localStorage.setItem('sas_student_biometrics', JSON.stringify(state.studentBiometrics));
                 }
 
+                const frame = window.CameraService.captureFrame(video);
                 if (state.backendOnline && frame) {
                     try {
                         await fetch(`${state.backendUrl}/api/students/${stuId}/enroll-frame`, {
@@ -2407,19 +2596,90 @@
                     } catch (e) {}
                 }
 
-                showToast(`Sample #${enrollCount} captured (Laplacian > 45)`, 'success');
+                showToast(`Sample #${enrollCount} captured`, 'success');
 
                 if (enrollCount === 5) {
-                    showToast('Biometric model trained and saved successfully!', 'success');
-                    const target = state.students.find(s => s.id === stuId);
-                    if (target) {
+                    showToast(`Biometric model trained and saved successfully for ${target.name}!`, 'success');
+                    target.enrolled = true;
+                    target.samples = 5;
+                    localStorage.setItem('sas_students', JSON.stringify(state.students));
+                    renderStudentsTable();
+                }
+            } else {
+                showToast('5 samples already captured. Click "Start Camera" or select another student to re-enroll.', 'info');
+            }
+        }
+
+        // Upload and enroll a face from an image file
+        async function handleEnrollFileUpload(event) {
+            const file = event.target.files && event.target.files[0];
+            if (!file) return;
+
+            const stuId = parseInt(document.getElementById('enroll-student-select').value);
+            const target = state.students.find(s => s.id === stuId);
+            if (!target) {
+                showToast('Please select a student first.', 'error');
+                return;
+            }
+
+            showToast('Analyzing uploaded face photo...', 'info');
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const dataUrl = e.target.result;
+                const img = new Image();
+                img.onload = async () => {
+                    const canvas = document.getElementById('enroll-canvas');
+                    if (canvas) {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0);
+
+                        await initFaceDetector();
+                        const detectedFaces = await detectFacesInVideo(img);
+
+                        if (!detectedFaces || detectedFaces.length === 0) {
+                            showToast('No face detected in photo. Please upload a clear frontal photo.', 'error');
+                            return;
+                        }
+
+                        const faceBox = detectedFaces[0];
+                        drawBoundingBox(ctx, faceBox, `Enrolled: ${target.name}`, '#10b981');
+
+                        const desc = extractFaceFeatureDescriptor(img, faceBox);
+                        if (desc) {
+                            state.studentBiometrics[stuId] = desc;
+                            localStorage.setItem('sas_student_biometrics', JSON.stringify(state.studentBiometrics));
+                        }
+
+                        if (state.backendOnline) {
+                            try {
+                                await fetch(`${state.backendUrl}/api/students/${stuId}/enroll-frame`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ image: dataUrl, consent: true })
+                                });
+                            } catch(err) {}
+                        }
+
+                        enrollCount = 5;
+                        const progBar = document.getElementById('enroll-progress-bar');
+                        const statText = document.getElementById('enroll-status-text');
+                        if (progBar) progBar.style.width = '100%';
+                        if (statText) statText.textContent = '5 / 5 Samples Captured (Photo Enrolled)';
+
                         target.enrolled = true;
                         target.samples = 5;
                         localStorage.setItem('sas_students', JSON.stringify(state.students));
                         renderStudentsTable();
+                        showToast(`Face enrolled successfully from uploaded photo for ${target.name}!`, 'success');
                     }
-                }
-            }
+                };
+                img.src = dataUrl;
+            };
+            reader.readAsDataURL(file);
+            event.target.value = '';
         }
 
         function triggerStudentReEnroll(id) {

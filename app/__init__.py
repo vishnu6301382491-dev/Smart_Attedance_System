@@ -11,7 +11,7 @@ from app.services.face_service import get_face_engine
 
 def create_app(config_name: str = 'default') -> Flask:
     app = Flask(__name__)
-    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/attendance/api/*": {"origins": "*"}}, supports_credentials=True)
+    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
     app.config.from_object(config[config_name])
 
     # Ensure required data directories exist
@@ -81,6 +81,24 @@ def create_app(config_name: str = 'default') -> Flask:
             'database': db_status,
             'face_engine': engine.engine_name,
             'version': app.config.get('APP_VERSION', '1.0.0')
+        })
+
+    @app.route('/api/diagnostics/face-engine')
+    def api_diagnostics_face_engine():
+        import cv2
+        from app.models import FaceEncoding, Student
+        engine = get_face_engine()
+        enrolled_count = FaceEncoding.query.count()
+        enrolled_students = Student.query.filter_by(face_enrolled=True).count()
+        cascade_ok = hasattr(engine, '_face_cascade') and not engine._face_cascade.empty() if hasattr(engine, '_face_cascade') else True
+        return jsonify({
+            'status': 'ok',
+            'engine_name': engine.engine_name,
+            'opencv_version': cv2.__version__,
+            'enrolled_templates': enrolled_count,
+            'enrolled_students': enrolled_students,
+            'cascade_loaded': cascade_ok,
+            'camera_api_ready': True
         })
 
     # Global context processor
