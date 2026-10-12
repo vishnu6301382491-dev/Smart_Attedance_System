@@ -118,6 +118,19 @@ class FaceRecognitionLBPHEngine(FaceRecognitionEngine):
         self._face_cascade = cv2.CascadeClassifier(self._cascade_path)
         self._recognizer = cv2.face.LBPHFaceRecognizer_create(radius=1, neighbors=8, grid_x=8, grid_y=8)
         self._trained = False
+        self._cached_items_hash = None
+        self._label_to_student = {}
+        self._model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data', 'faces', 'lbph_model.xml')
+        self._load_cached_model()
+
+    def _load_cached_model(self):
+        if os.path.exists(self._model_path):
+            try:
+                self._recognizer.read(self._model_path)
+                self._trained = True
+                logger.info(f"Loaded persistent LBPH face model from {self._model_path}")
+            except Exception as e:
+                logger.warning(f"Could not read cached LBPH model: {e}")
 
     @property
     def engine_name(self) -> str:
@@ -200,56 +213,92 @@ class FaceRecognitionLBPHEngine(FaceRecognitionEngine):
         # Store as base64 string representation of the 120x120 grayscale ROI
         return base64.b64encode(face_resized.tobytes()).decode('utf-8')
 
+    def train_model(self, enrolled_items: List[Dict[str, Any]], save_to_disk: bool = True) -> bool:
+        """
+        Trains persistent LBPH model grouping multiple face samples per student under their student_id.
+        """
+        if not enrolled_items:
+            self._trained = False
+            self._label_to_student.clear()
+            return False
+
+        faces = []
+        labels = []
+        label_to_student = {}
+
+        for item in enrolled_items:
+            try:
+                stu_id = int(item['student_id'])
+                enc_bytes = base64.b64decode(item['encoding'])
+                face_arr = np.frombuffer(enc_bytes, dtype=np.uint8).reshape((120, 120))
+                faces.append(face_arr)
+                labels.append(stu_id)
+                label_to_student[stu_id] = {
+                    'student_id': stu_id,
+                    'name': item.get('name', ''),
+                    'roll_no': item.get('roll_no', '')
+                }
+            except Exception as e:
+                logger.warning(f"Error decoding enrolled face item: {e}")
+
+        if not faces:
+            self._trained = False
+            return False
+
+        try:
+            self._recognizer = cv2.face.LBPHFaceRecognizer_create(radius=1, neighbors=8, grid_x=8, grid_y=8)
+            self._recognizer.train(faces, np.array(labels, dtype=np.int32))
+            self._trained = True
+            self._label_to_student = label_to_student
+
+            if save_to_disk:
+                os.makedirs(os.path.dirname(self._model_path), exist_ok=True)
+                self._recognizer.write(self._model_path)
+                logger.info(f"Persistent LBPH model saved with {len(faces)} samples across {len(label_to_student)} students to {self._model_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error training LBPH model: {e}")
+            return False
+
     def match_candidate(self, candidate_encoding: Any, enrolled_items: List[Dict[str, Any]], threshold: float = 65.0) -> Optional[Dict[str, Any]]:
         """
-        Trains or uses cached LBPH matcher over enrolled items.
+        Matches candidate encoding against enrolled student items.
         enrolled_items: list of {'student_id': int, 'name': str, 'roll_no': str, 'encoding': str}
         """
         if not candidate_encoding or not enrolled_items:
             return None
 
-        candidate_bytes = base64.b64decode(candidate_encoding)
-        candidate_roi = np.frombuffer(candidate_bytes, dtype=np.uint8).reshape((120, 120))
+        # Determine if retraining is required due to updated student list
+        items_hash = len(enrolled_items) + sum(int(item.get('student_id', 0)) for item in enrolled_items)
+        if not self._trained or self._cached_items_hash != items_hash:
+            self.train_model(enrolled_items, save_to_disk=True)
+            self._cached_items_hash = items_hash
 
-        # Re-train local LBPH model on enrolled student faces
-        recognizer = cv2.face.LBPHFaceRecognizer_create()
-        faces = []
-        labels = []
-        label_to_student = {}
-        label_idx = 1
-
-        for item in enrolled_items:
-            try:
-                enc_bytes = base64.b64decode(item['encoding'])
-                face_arr = np.frombuffer(enc_bytes, dtype=np.uint8).reshape((120, 120))
-                faces.append(face_arr)
-                labels.append(label_idx)
-                label_to_student[label_idx] = item
-                label_idx += 1
-            except Exception as e:
-                logger.warning(f"Error decoding enrolled face item: {e}")
-
-        if not faces:
+        if not self._trained:
             return None
 
-        recognizer.train(faces, np.array(labels))
-        predicted_label, lbph_distance = recognizer.predict(candidate_roi)
+        try:
+            candidate_bytes = base64.b64decode(candidate_encoding)
+            candidate_roi = np.frombuffer(candidate_bytes, dtype=np.uint8).reshape((120, 120))
+            predicted_label, lbph_distance = self._recognizer.predict(candidate_roi)
 
-        # LBPH distance: 0 is exact match, 100+ is distant. Default confidence threshold is 65-75.
-        # Normalize to 0.0 - 1.0 match confidence
-        normalized_confidence = max(0.0, min(1.0, 1.0 - (lbph_distance / 100.0)))
-        
-        # If distance is within threshold (e.g. <= 70)
-        max_dist_allowed = threshold if threshold > 1.0 else (1.0 - threshold) * 100.0
-        if lbph_distance <= max_dist_allowed and predicted_label in label_to_student:
-            student = label_to_student[predicted_label]
-            return {
-                'student_id': student['student_id'],
-                'name': student['name'],
-                'roll_no': student['roll_no'],
-                'confidence': round(normalized_confidence, 2),
-                'raw_distance': round(float(lbph_distance), 2)
-            }
+            # LBPH distance: 0 is exact match, 100+ is distant. Default confidence threshold is 65-75.
+            # Normalize to 0.0 - 1.0 match confidence
+            normalized_confidence = max(0.0, min(1.0, 1.0 - (lbph_distance / 100.0)))
+            
+            # If distance is within threshold (e.g. <= 70)
+            max_dist_allowed = threshold if threshold > 1.0 else (1.0 - threshold) * 100.0
+            if lbph_distance <= max_dist_allowed and predicted_label in self._label_to_student:
+                student = self._label_to_student[predicted_label]
+                return {
+                    'student_id': student['student_id'],
+                    'name': student['name'],
+                    'roll_no': student['roll_no'],
+                    'confidence': round(normalized_confidence, 2),
+                    'raw_distance': round(float(lbph_distance), 2)
+                }
+        except Exception as e:
+            logger.error(f"Error matching candidate in LBPH: {e}")
 
         return None
 

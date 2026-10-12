@@ -151,3 +151,12 @@ def test_api_holidays_settings_backups_profile(client, app):
     res = client.post('/api/backups')
     assert res.status_code == 200
 
+
+def test_api_retrain_faces(client, app):
+    res = client.post('/api/students/retrain')
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data['success'] is True
+    assert 'samples_count' in data
+
+

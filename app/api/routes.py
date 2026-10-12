@@ -136,22 +136,74 @@ def api_logout():
 
 @bp.route('/dashboard/stats', methods=['GET'])
 def api_dashboard_stats():
-    total_students = Student.query.filter_by(is_active=True).count()
-    enrolled_students = Student.query.filter_by(is_active=True, face_enrolled=True).count()
+    from datetime import timedelta
+    class_filter = request.args.get('class', '').strip()
+    class_id_filter = request.args.get('class_id', type=int)
+
+    classroom = None
+    stu_query = Student.query.filter_by(is_active=True)
+    if class_id_filter:
+        stu_query = stu_query.filter_by(class_id=class_id_filter)
+        classroom = db.session.get(ClassRoom, class_id_filter)
+    elif class_filter:
+        classroom = ClassRoom.query.filter_by(name=class_filter).first()
+        if classroom:
+            stu_query = stu_query.filter_by(class_id=classroom.id)
+
+    total_students = stu_query.count()
+    enrolled_students = stu_query.filter_by(face_enrolled=True).count()
     total_teachers = User.query.filter_by(role='teacher', is_active=True).count()
     total_classes = ClassRoom.query.filter_by(is_active=True).count()
 
     today = date.today()
-    today_sessions = AttendanceSession.query.filter_by(date=today).all()
-    today_records = AttendanceRecord.query.join(AttendanceSession).filter(AttendanceSession.date == today).all()
+    session_query = AttendanceSession.query.filter_by(date=today)
+    if classroom:
+        session_query = session_query.filter_by(class_id=classroom.id)
+    today_sessions = session_query.all()
 
-    today_present = sum(1 for r in today_records if r.status in ('Present', 'Late'))
-    today_total = len(today_records)
-    today_pct = round((today_present / today_total * 100.0), 1) if today_total > 0 else 88.5
+    record_query = AttendanceRecord.query.join(AttendanceSession).filter(AttendanceSession.date == today)
+    if classroom:
+        record_query = record_query.filter(AttendanceSession.class_id == classroom.id)
+    today_records = record_query.all()
 
-    # 7-day trend
-    labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Today']
-    data = [88, 92, 85, 90, 82, int(round(today_pct))]
+    present_student_ids = set(r.student_id for r in today_records if r.status in ('Present', 'Late'))
+    today_present = len(present_student_ids)
+    today_total = total_students if total_students > 0 else len(today_records)
+    today_pct = round((today_present / today_total * 100.0), 1) if today_total > 0 else 0.0
+
+    # Shortage alerts (< 75% overall)
+    threshold = float(get_setting('attendance_threshold', '75.0'))
+    students_to_check = stu_query.all()
+    shortage_count = 0
+    for s in students_to_check:
+        s_total = AttendanceRecord.query.filter_by(student_id=s.id).count()
+        if s_total > 0:
+            s_present = AttendanceRecord.query.filter(AttendanceRecord.student_id == s.id, AttendanceRecord.status.in_(['Present', 'Late'])).count()
+            if (s_present / s_total * 100.0) < threshold:
+                shortage_count += 1
+
+    # Real 7-day trend calculation
+    labels = []
+    data = []
+    for i in range(5, -1, -1):
+        d = today - timedelta(days=i)
+        day_label = 'Today' if i == 0 else d.strftime('%a')
+        labels.append(day_label)
+
+        d_query = AttendanceRecord.query.join(AttendanceSession).filter(AttendanceSession.date == d)
+        if classroom:
+            d_query = d_query.filter(AttendanceSession.class_id == classroom.id)
+        d_recs = d_query.all()
+
+        if d_recs:
+            d_pres = sum(1 for r in d_recs if r.status in ('Present', 'Late'))
+            d_pct = round((d_pres / len(d_recs)) * 100.0, 1)
+            data.append(d_pct)
+        else:
+            if i == 0 and today_present > 0 and today_total > 0:
+                data.append(today_pct)
+            else:
+                data.append(0.0)
 
     return jsonify({
         'success': True,
@@ -160,8 +212,11 @@ def api_dashboard_stats():
             'enrolled_students': enrolled_students,
             'total_teachers': total_teachers,
             'total_classes': total_classes,
+            'today_present': today_present,
+            'today_total': today_total,
             'today_attendance_pct': today_pct,
-            'today_sessions_count': len(today_sessions)
+            'today_sessions_count': len(today_sessions),
+            'shortage_count': shortage_count
         },
         'trend': {
             'labels': labels,
@@ -398,8 +453,44 @@ def api_delete_student_biometrics(id):
     student.biometric_consent = False
     db.session.commit()
 
+    # Re-train LBPH engine with remaining enrolled faces
+    try:
+        engine = get_face_engine()
+        encodings = FaceEncoding.query.join(Student).filter(Student.is_active == True, Student.face_enrolled == True).all()
+        enrolled_items = [{'student_id': e.student_id, 'name': e.student.name, 'roll_no': e.student.roll_no, 'encoding': e.encoding} for e in encodings]
+        if hasattr(engine, 'train_model'):
+            engine.train_model(enrolled_items, save_to_disk=True)
+    except Exception as e:
+        logger.warning(f"Error updating face engine after biometric deletion: {e}")
+
     log_audit('FACE_BIOMETRICS_DELETED', 'Student', student.id)
     return jsonify({'success': True, 'message': 'Biometric records wiped successfully.'})
+
+
+@bp.route('/students/retrain', methods=['POST'])
+def api_retrain_faces():
+    """
+    Retrains LBPH face model across all active enrolled students.
+    """
+    engine = get_face_engine()
+    encodings = FaceEncoding.query.join(Student).filter(Student.is_active == True, Student.face_enrolled == True).all()
+    enrolled_items = []
+    for enc in encodings:
+        enrolled_items.append({
+            'student_id': enc.student_id,
+            'name': enc.student.name if enc.student else '',
+            'roll_no': enc.student.roll_no if enc.student else '',
+            'encoding': enc.encoding
+        })
+    success = False
+    if hasattr(engine, 'train_model'):
+        success = engine.train_model(enrolled_items, save_to_disk=True)
+    return jsonify({
+        'success': True,
+        'message': f'Model retrained with {len(enrolled_items)} samples across active enrolled students.',
+        'samples_count': len(enrolled_items),
+        'trained': success
+    })
 
 
 # ==========================================
@@ -672,6 +763,8 @@ def api_start_session():
             'success': True,
             'message': 'Resumed existing active session.',
             'session_id': active.id,
+            'class_name': active.classroom.name if active.classroom else '',
+            'subject_name': active.subject.name if active.subject else '',
             'is_resumed': True
         })
 
@@ -688,7 +781,9 @@ def api_start_session():
     return jsonify({
         'success': True,
         'message': 'Attendance session started.',
-        'session_id': session.id
+        'session_id': session.id,
+        'class_name': session.classroom.name if session.classroom else '',
+        'subject_name': session.subject.name if session.subject else ''
     }), 201
 
 
